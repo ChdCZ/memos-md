@@ -1,0 +1,88 @@
+name: build
+
+# Builds release binaries for this fork. The UI, API and every other behaviour
+# come from upstream memos; the only addition is markdown-file storage, which is
+# compiled in and switched on with --memo-files (env MEMOS_MEMO_FILES).
+
+on:
+  push:
+    branches: [memos-md]
+    tags: ["v*"]
+  pull_request:
+    branches: [memos-md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./core/memofile/... ./store/... ./cmd/memos/
+      - name: tests
+        run: go test -race ./core/memofile/...
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, ext: "" }
+          - { goos: linux, goarch: arm64, ext: "" }
+          - { goos: darwin, goarch: arm64, ext: "" }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build the SPA into server/frontend/dist
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm release
+      - name: Build the binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/usememos/memos/internal/version.Version=${{ github.ref_name }}" \
+            -tags netgo,osusergo \
+            -o "memos-md-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" \
+            ./cmd/memos
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: memos-md-*
+          generate_release_notes: true
+          body: |
+            Release binaries build the SPA in and enable markdown-file storage.
+
+            Run it with the notes directory mounted:
+
+            ```
+            ./memos-md-<os>-<arch> --memo-files --port 5230 --data ./data
+            ```
+
+            Everything you write lands in `data/memos/<uid>.md`. Without
+            `--memo-files` the binary behaves exactly like upstream memos.

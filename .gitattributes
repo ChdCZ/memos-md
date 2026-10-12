@@ -1,0 +1,18 @@
+# This fork is developed on Windows as well as Linux, and its own sources are
+# LF. Without this, Git's core.autocrlf on Windows rewrites every file on
+# checkout and `git status` reports thousands of modified files.
+* text=auto eol=lf
+
+# Binary assets must never be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.db binary

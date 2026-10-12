@@ -90,17 +90,19 @@ mirror takes a lock that recognises the goroutine already holding it and lets th
 ## Running it
 
 ```bash
-# Go only — the SPA is already built into server/frontend/dist
-go run ./cmd/memos --memo-files --port 5230 --data ./data
+# Simplest: build the SPA and the binary in one command (needs go + pnpm)
+go run cmd/memos-build/main.go -o memos-md
+./memos-md --memo-files --port 5230 --data ./data
+
+# Or build it yourself — go:embed needs server/frontend/dist to exist first
+cd web && pnpm install && pnpm release && cd ..
+go build -o memos-md ./cmd/memos
 
 # Docker — ./Dockerfile builds both the SPA and the binary, so nothing has to be
 # built on the host first
 docker compose -f docker-compose.memofiles.yml up -d --build
 #   or: docker build -t memos-md . && docker run -d --name memos-md \
 #         -p 5230:5230 -v "$PWD/data:/var/opt/memos" memos-md
-
-# Rebuilding the SPA by hand (only needed after editing web/)
-cd web && pnpm install && pnpm release && cd ..
 ```
 
 `--memo-files` is the only new flag (env: `MEMOS_MEMO_FILES`). Without it the binary behaves exactly like upstream.
