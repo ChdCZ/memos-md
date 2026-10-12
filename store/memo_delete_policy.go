@@ -46,12 +46,23 @@ func (s *Store) DeleteMemoWithPolicy(ctx context.Context, delete *DeleteMemoWith
 	if delete == nil || delete.MemoID <= 0 || delete.ActorUserID <= 0 {
 		return nil, errors.New("memo deletion requires memo and actor")
 	}
+	// Read the uid before the row disappears: the file mirror needs it to find
+	// the file it owns.
+	var deletedUID string
+	if s.getMemoMirror() != nil {
+		if memo, err := s.GetMemo(ctx, &FindMemo{ID: &delete.MemoID, ExcludeContent: true}); err == nil && memo != nil {
+			deletedUID = memo.UID
+		}
+	}
 	result, err := s.driver.DeleteMemoWithPolicy(ctx, delete)
 	if err != nil {
 		return nil, err
 	}
 	if result == nil {
 		return nil, errors.New("unexpected nil memo deletion result")
+	}
+	if mirror := s.getMemoMirror(); mirror != nil && deletedUID != "" {
+		mirror.RemoveMemo(ctx, deletedUID)
 	}
 	return result, nil
 }

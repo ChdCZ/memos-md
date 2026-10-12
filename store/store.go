@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -10,10 +11,28 @@ import (
 	"github.com/usememos/memos/store/cache"
 )
 
+// MemoMirror receives every memo the store successfully writes or deletes so an
+// additional storage surface can be kept in step with the database. It is
+// optional: a nil mirror keeps the store a pure database store, which is how
+// every build except the markdown-file one runs.
+type MemoMirror interface {
+	// MirrorMemo persists the current state of one memo.
+	MirrorMemo(ctx context.Context, memo *Memo)
+	// RemoveMemo drops the persisted copy of a memo that no longer exists.
+	RemoveMemo(ctx context.Context, uid string)
+	// StoreChanged reports that a write the mirror does not model itself
+	// happened, such as the first account being created. A mirror that has
+	// files waiting for an owner imports them here.
+	StoreChanged(ctx context.Context)
+}
+
 // Store provides database access to all raw objects.
 type Store struct {
 	profile *profile.Profile
 	driver  Driver
+
+	mirrorMu sync.RWMutex
+	mirror   MemoMirror
 
 	userCreateMu   sync.Mutex
 	authConfigMu   sync.Mutex
@@ -72,6 +91,43 @@ func New(driver Driver, profile *profile.Profile) *Store {
 
 func (s *Store) GetDriver() Driver {
 	return s.driver
+}
+
+// SetMemoMirror attaches a mirror that follows every memo write. Passing nil
+// detaches the current mirror.
+func (s *Store) SetMemoMirror(mirror MemoMirror) {
+	s.mirrorMu.Lock()
+	defer s.mirrorMu.Unlock()
+	s.mirror = mirror
+}
+
+// getMemoMirror returns the attached mirror, if any.
+func (s *Store) getMemoMirror() MemoMirror {
+	s.mirrorMu.RLock()
+	defer s.mirrorMu.RUnlock()
+	return s.mirror
+}
+
+// mirroredMemo refreshes a memo from the database and hands it to the mirror.
+// Mirroring failures never fail the database write they follow: the file layer
+// is a projection that the next sync repairs.
+func (s *Store) mirroredMemo(ctx context.Context, memoID int32) {
+	mirror := s.getMemoMirror()
+	if mirror == nil || memoID <= 0 {
+		return
+	}
+	memo, err := s.GetMemo(ctx, &FindMemo{ID: &memoID})
+	if err != nil || memo == nil {
+		return
+	}
+	mirror.MirrorMemo(ctx, memo)
+}
+
+// notifyMirror reports a write the mirror does not model as a memo mutation.
+func (s *Store) notifyMirror(ctx context.Context) {
+	if mirror := s.getMemoMirror(); mirror != nil {
+		mirror.StoreChanged(ctx)
+	}
 }
 
 // GetDataDir returns the store data directory.

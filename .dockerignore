@@ -9,13 +9,20 @@ coverage.out
 /.worktrees/
 
 # Not used by the image build
-/web/
+#
+# /web/ IS used: the first stage of ./Dockerfile builds the SPA from it, so the
+# frontend sources and lockfile stay in the build context. Upstream's own
+# scripts/Dockerfile expects `pnpm release` to have run and still ignores /web/.
 /docs/
 /.github/
 *.md
 /.gitignore
 /.dockerignore
 /.golangci.yaml
+
+# Local data: notes and the SQLite database never belong in an image
+/data/
+/examples/
 
 # Local metadata and secrets
 /.git/

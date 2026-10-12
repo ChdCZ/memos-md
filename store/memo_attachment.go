@@ -162,5 +162,17 @@ func (s *Store) ApplyMemoMutation(ctx context.Context, mutation *MemoMutation) e
 			seenRelatedMemoIDs[relation.RelatedMemoID] = struct{}{}
 		}
 	}
-	return s.driver.ApplyMemoMutation(ctx, mutation)
+	if err := s.driver.ApplyMemoMutation(ctx, mutation); err != nil {
+		return err
+	}
+	// Keep the optional file mirror in step with the committed mutation.
+	if mirror := s.getMemoMirror(); mirror != nil {
+		switch {
+		case mutation.MemoCreate != nil:
+			mirror.MirrorMemo(ctx, mutation.MemoCreate)
+		case mutation.MemoID > 0:
+			s.mirroredMemo(ctx, mutation.MemoID)
+		}
+	}
+	return nil
 }

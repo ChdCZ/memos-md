@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/usememos/memos/core/memofile"
 	"github.com/usememos/memos/internal/profile"
 	"github.com/usememos/memos/internal/version"
 	"github.com/usememos/memos/internal/webhook"
@@ -54,8 +56,10 @@ func init() {
 	viper.SetDefault("demo", false)
 	viper.SetDefault("driver", "sqlite")
 	viper.SetDefault("port", 8081)
+	viper.SetDefault("memo-files", false)
 
 	rootCmd.Flags().Bool("demo", false, "enable demo mode")
+	rootCmd.Flags().Bool("memo-files", false, "keep every memo as a markdown file under <data>/memos and import files found there")
 	rootCmd.Flags().String("addr", "", "address of server")
 	rootCmd.Flags().Int("port", 8081, "port of server")
 	rootCmd.Flags().String("unix-sock", "", "path to the unix socket, overrides --addr and --port")
@@ -86,6 +90,7 @@ func init() {
 		"log-level",
 		"rate-limit",
 		"trusted-proxies",
+		"memo-files",
 	} {
 		if err := viper.BindPFlag(key, rootCmd.Flags().Lookup(key)); err != nil {
 			panic(err)
@@ -161,6 +166,36 @@ func runServer() error {
 	accessSetting, err := storeInstance.GetInstanceAccessSetting(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to get instance access setting")
+	}
+
+	// Markdown-file storage: attach the file mirror, then reconcile whatever is
+	// already on disk before the HTTP server starts accepting writes.
+	if viper.GetBool("memo-files") {
+		mirror, err := memofile.NewMirror(ctx, storeInstance, memofile.NewMarkdownService(), instanceProfile.Data)
+		if err != nil {
+			return errors.Wrap(err, "failed to initialize memo file storage")
+		}
+		storeInstance.SetMemoMirror(mirror)
+		report, err := mirror.Sync(ctx)
+		if err != nil {
+			slog.Warn("failed to reconcile memo files", slog.Any("err", err))
+		} else {
+			slog.Info("memo file storage ready",
+				slog.String("dir", filepath.Join(instanceProfile.Data, memofile.DirName)),
+				slog.Int("written", report.Written),
+				slog.Int("imported", report.Imported),
+				slog.Int("updated", report.Updated),
+				slog.Int("removed", report.Removed),
+			)
+			for _, syncErr := range report.Errors {
+				slog.Warn("memo file sync issue", slog.Any("err", syncErr))
+			}
+		}
+		defer func() {
+			if err := mirror.Close(); err != nil {
+				slog.Error("failed to close memo file storage", "error", err)
+			}
+		}()
 	}
 
 	s, err := server.NewServer(ctx, instanceProfile, storeInstance)

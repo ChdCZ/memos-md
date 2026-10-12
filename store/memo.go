@@ -186,7 +186,14 @@ func (s *Store) CreateMemo(ctx context.Context, create *Memo) (*Memo, error) {
 	if err := validateMemoCreate(create); err != nil {
 		return nil, err
 	}
-	return s.driver.CreateMemo(ctx, create)
+	memo, err := s.driver.CreateMemo(ctx, create)
+	if err != nil {
+		return nil, err
+	}
+	if mirror := s.getMemoMirror(); mirror != nil && memo != nil {
+		mirror.MirrorMemo(ctx, memo)
+	}
+	return memo, nil
 }
 
 // CreateMemoComment atomically creates one independent memo and its immutable
@@ -255,10 +262,11 @@ func (s *Store) UpdateMemo(ctx context.Context, update *UpdateMemo) error {
 	if err := validateMemoWritePolicy(update.Policy); err != nil {
 		return err
 	}
-	if update.Policy == nil {
-		return s.driver.UpdateMemo(ctx, update)
+	if err := s.driver.UpdateMemo(ctx, update); err != nil {
+		return err
 	}
-	return s.driver.UpdateMemo(ctx, update)
+	s.mirroredMemo(ctx, update.ID)
+	return nil
 }
 
 func validateMemoWritePolicy(policy *MemoWritePolicy) error {

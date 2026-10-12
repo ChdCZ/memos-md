@@ -1,0 +1,41 @@
+# memos-md — docker compose for the markdown-file fork of memos.
+#
+#   docker compose -f docker-compose.memofiles.yml up -d --build
+#   open http://localhost:5230
+#
+# The image builds the SPA and the Go binary itself, so nothing has to be built
+# on the host first. Everything you write is stored as a markdown file in
+# ./data/memos; the SQLite database in ./data stays the query engine and is
+# rebuilt from the markdown files if you delete it.
+#
+# Upstream ships no compose file, which is why this one carries the -memofiles
+# suffix: it is this fork's, not memos'.
+
+services:
+  memos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: memos-md:latest
+    container_name: memos-md
+    restart: unless-stopped
+    ports:
+      - "5230:5230"
+    environment:
+      MEMOS_MEMO_FILES: "true"          # mirror memos to markdown files
+      MEMOS_PORT: "5230"
+      MEMOS_DRIVER: sqlite
+      MEMOS_DATA: /var/opt/memos
+      TZ: ${TZ:-UTC}
+      # Canonical public URL, needed for correct links behind a proxy.
+      # MEMOS_INSTANCE_URL: https://memos.example.com
+    volumes:
+      - ./data:/var/opt/memos
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5230/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true

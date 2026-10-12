@@ -22,3 +22,11 @@ dist/
 # when --config.store-dir is set without an existing store; it contains a
 # symlink back to the workspace.
 .pnpm-store/
+
+# memos-md: the data directory holds your notes and a local database. Only the
+# examples/ copies of the file format are tracked.
+/data/memos/
+/data/memos_*.db
+/data/memos_*.db-shm
+/data/memos_*.db-wal
+/docker-compose.override.yml

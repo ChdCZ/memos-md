@@ -121,6 +121,8 @@ func (s *Store) CreateUser(ctx context.Context, create *User) (*User, error) {
 	}
 
 	s.userCache.Set(ctx, userCacheKey(user.ID), user)
+	// The first account unlocks memos waiting for an owner. See MemoMirror.
+	s.notifyMirror(ctx)
 	return user, nil
 }
 
@@ -153,6 +155,7 @@ func (s *Store) CreateUserIfNoUsers(ctx context.Context, create *User) (*User, b
 		return nil, false, err
 	}
 	s.userCache.Set(ctx, userCacheKey(user.ID), user)
+	s.notifyMirror(ctx)
 	return user, true, nil
 }
 
