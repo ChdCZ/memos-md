@@ -107,12 +107,33 @@ docker compose -f docker-compose.memofiles.yml up -d --build
 
 `--memo-files` is the only new flag (env: `MEMOS_MEMO_FILES`). Without it the binary behaves exactly like upstream.
 
-`data/` starts empty: the first start creates the database, and `examples/` holds two sample memos you can copy in to
-see the format:
+`data/` starts empty: the first start creates the database. Open the web UI, create the first account, and start writing —
+each memo appears as `data/memos/<uid>.md` as you save it. `examples/` holds two sample memos that show the format; copy
+them in at any time and they are imported (on a fresh instance they wait for the first account, then import themselves):
 
 ```bash
 mkdir -p data/memos && cp examples/*.md data/memos/     # imported on the next start
 ```
+
+### Notes from running it on a real host
+
+* **Who owns `data/`.** The image starts as root, chowns the data directory, then drops to `MEMOS_UID`/`MEMOS_GID`
+  (default `10001`). The default means your notes are owned by uid 10001 and you need `sudo` to edit them. Set both to
+  your own ids to make the notes yours:
+  ```bash
+  MEMOS_UID=$(id -u) MEMOS_GID=$(id -g) docker compose -f docker-compose.memofiles.yml up -d --force-recreate
+  ```
+* **Go module proxy.** The build downloads modules inside the image. If `proxy.golang.org` is unreachable on your
+  network the build fails with `dial tcp ... i/o timeout`; the Dockerfile defaults to `goproxy.cn` first and takes a
+  `--build-arg GOPROXY=...` override.
+* **Container DNS.** If containers come up without outbound DNS (`wget`/`go` time out while the host works fine), the
+  daemon is using `8.8.8.8` while your network resolves through a local resolver. Point Docker at a reachable one:
+  ```json
+  // /etc/docker/daemon.json
+  { "dns": ["127.0.0.1", "223.5.5.5", "119.29.29.29"] }
+  ```
+  Docker keeps `127.0.0.1` out of a container's `/etc/resolv.conf` unless it is named there, so a host that resolves
+  through a local DNS proxy needs this.
 
 ### Working outside the app
 
@@ -148,12 +169,47 @@ Nothing else in `server/`, `web/`, `proto/` or the database drivers was touched.
 only failures on a Windows checkout are upstream's own symlink test (needs Developer Mode) and a timing-sensitive cache
 test, both of which fail identically on a pristine v0.31.0 tree.
 
+## Verified on a real host
+
+The image was built and driven end to end on a Debian 13 box (Docker 29.9.0, 2 GB RAM, 4 vCPU) with a real HTTP client
+rather than unit tests alone. All of the following passed there:
+
+| Check | Result |
+| --- | --- |
+| `docker compose -f docker-compose.memofiles.yml up -d --build` from a clean checkout | image 105 MB, container healthy |
+| Create / read / update / delete a memo over the API | markdown file appears, changes in place, disappears with the memo |
+| CJK title, body, hashtags and task list | indexed and mirrored correctly |
+| One markdown file per memo | held after create, edit, delete and restart |
+| Hand-written note dropped into `data/memos/` | imported on the next start, uid/tags/pinned/visibility kept |
+| Note edited on disk with `sed` | edit reaches the database and survives the mirror's rewrite |
+| Attachment upload (chunked upload RPC) + memo reference | bytes mirrored to `data/memos/attachments/<uid>/<name>`, downloadable |
+| Delete the memo in the container | its markdown file is removed |
+| Container restart | notes and database intact |
+| `data/` committed to git | 5 files including attachments, subsequent edits show up as diffs |
+| `go test ./core/memofile/` inside the container's Go toolchain | 16 tests pass |
+
+Three bugs surfaced only under that test and are fixed, each with a regression test:
+
+1. **Attachment bytes were never mirrored.** A managed attachment is uploaded unbound and bound in the same transaction
+   that writes the memo. Binding does not change the memo file, so the "nothing changed, skip" shortcut in the mirror
+   ran before the attachment pass and the bytes never landed.
+2. **Uploaded bytes are not in the attachment row.** With the default LOCAL storage the row keeps metadata plus a
+   `reference` path and leaves the blob column empty, so a mirror that read `attachment.Blob` copied nothing. It now
+   reads the referenced file (absolute, or relative to the data directory) and only skips genuine object storage.
+3. **An on-disk edit that changed tags lost its body.** The tag-merge path rebuilt the payload without the new content,
+   leaving the store on the old body while its tags came from the new one; the mirror then wrote that stale body back
+   over the file the user had just edited. The edit path now updates the payload in one place and the sync loop mirrors
+   the refreshed memo instead of the copy it read before the import.
+
 ## Known limits
 
 * A `.md` edited while the server is running is imported on the next start, not immediately. The 30 second SQLite
   polling loop upstream runs for rebuilds is not a file watcher; adding one is the obvious next step.
-* Attachment bytes are mirrored out to `data/memos/attachments/<uid>/<name>` for portability, but uploaded files are still
-  served from the database, so removing an attachment's blob from SQLite would break its download link.
+* Attachment bytes are copied into `data/memos/attachments/<uid>/<name>` for portability. The attachment's own storage
+  (a file under `data/assets/` for LOCAL, or an S3 object) stays authoritative, so this copy is a mirror, not the
+  original: deleting it does not break a download, and re-uploading is not needed.
+* Objects stored in S3 are not copied — the bytes are not on the instance's filesystem. The attachment stays listed in
+  the front matter.
 * Comments are memos of their own kind and are mirrored as individual files; their `COMMENT` relation is not part of the
   front matter yet.
 * This is still a single-instance design: point two servers at the same data directory and the sidecar index will fight.

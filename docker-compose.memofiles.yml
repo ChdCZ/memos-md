@@ -27,6 +27,12 @@ services:
       MEMOS_DRIVER: sqlite
       MEMOS_DATA: /var/opt/memos
       TZ: ${TZ:-UTC}
+      # Whose uid/gid owns ./data. The image starts as root, chowns the data
+      # directory to these values and then drops privileges. Set them to your
+      # own `id -u`/`id -g` so the notes are yours to edit and commit:
+      #   MEMOS_UID=$(id -u) MEMOS_GID=$(id -g) docker compose -f ... up -d --force-recreate
+      MEMOS_UID: ${MEMOS_UID:-10001}
+      MEMOS_GID: ${MEMOS_GID:-10001}
       # Canonical public URL, needed for correct links behind a proxy.
       # MEMOS_INSTANCE_URL: https://memos.example.com
     volumes:

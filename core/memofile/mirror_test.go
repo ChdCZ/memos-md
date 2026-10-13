@@ -12,6 +12,7 @@ import (
 	"github.com/usememos/memos/core/memopayload"
 	"github.com/usememos/memos/internal/profile"
 	"github.com/usememos/memos/internal/random"
+	storepb "github.com/usememos/memos/proto/gen/store"
 	"github.com/usememos/memos/store"
 	"github.com/usememos/memos/store/db"
 )
@@ -101,6 +102,64 @@ func TestMirrorWritesMemoFile(t *testing.T) {
 	after, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, info.ModTime(), after.ModTime())
+}
+
+// TestMirrorWritesBoundAttachment is a regression test for two bugs found by
+// running the fork against a real server:
+//
+//  1. A managed attachment is uploaded unbound and bound in the same
+//     transaction that creates the memo. Binding does not change the memo file
+//     itself, so mirroring attachments only after deciding "the file is
+//     unchanged" left the bytes out of the data directory entirely.
+//  2. An uploaded attachment keeps its bytes outside the row 鈥?for the default
+//     LOCAL storage, in a file named by `reference` 鈥?while the blob column
+//     stays empty. Reading only the blob mirrored nothing on a real upload.
+func TestMirrorWritesBoundAttachment(t *testing.T) {
+	mirror, st, user, dataDir := newTestMirror(t)
+	ctx := context.Background()
+
+	// Stage the bytes the way an upload does: a file under the data directory,
+	// referenced from the row, with no inline blob.
+	blob := []byte("\x89PNG\r\n\x1a\nnot-really-a-png")
+	storedPath := "assets/" + "1791897745_isolate.png"
+	require.NoError(t, os.MkdirAll(filepath.Join(dataDir, "assets"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, filepath.FromSlash(storedPath)), blob, 0o644))
+
+	attachment, err := st.CreateAttachment(ctx, &store.Attachment{
+		UID:         "Attachment01",
+		CreatorID:   user.ID,
+		Filename:    "screenshot.png",
+		Type:        "image/png",
+		Size:        int64(len(blob)),
+		StorageType: storepb.AttachmentStorageType_LOCAL,
+		Reference:   storedPath,
+	})
+	require.NoError(t, err)
+	require.Empty(t, attachment.Blob, "an uploaded attachment does not carry an inline blob")
+
+	attachmentDir := filepath.Join(dataDir, DirName, AttachmentDir(attachment.UID))
+	require.NoDirExists(t, attachmentDir, "an unbound attachment has no memo to mirror yet")
+
+	memo := createMemo(t, st, user, "note with an image #shot", store.Public)
+	require.NoError(t, st.ApplyMemoMutation(ctx, &store.MemoMutation{
+		MemoID:                memo.ID,
+		MemoCreatorID:         user.ID,
+		ExpectedMemoContent:   memo.Content,
+		Bindings:              []*store.MemoAttachmentBinding{{ID: attachment.ID, UID: attachment.UID}},
+		RequiredAttachmentIDs: []int32{attachment.ID},
+	}))
+
+	require.DirExists(t, attachmentDir, "binding an attachment must mirror its bytes")
+	require.Equal(t, blob, []byte(readFile(t, filepath.Join(attachmentDir, "screenshot.png"))))
+
+	// The memo file names the attachment so a reader can find the bytes.
+	require.Contains(t, readFile(t, filepath.Join(dataDir, DirName, FileName(memo.UID))), "Attachment01")
+
+	// A later sync must not drop it either.
+	report, err := mirror.Sync(ctx)
+	require.NoError(t, err)
+	require.Empty(t, report.Errors)
+	require.DirExists(t, attachmentDir)
 }
 
 func TestMirrorFollowsStoreUpdatesAndDeletes(t *testing.T) {
@@ -248,6 +307,40 @@ func TestSyncAppliesLocalEdits(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "after the edit #local", strings.TrimRight(reloaded.Content, "\n"))
 	require.Equal(t, []string{"local"}, reloaded.Payload.Tags)
+}
+
+// TestSyncAppliesLocalEditWithTagChanges guards the case where an edit also
+// changes the tags: the payload carries both the indexed tags and the memo
+// properties, so rebuilding it has to include the new body. Writing a payload
+// that lacks the new body left the store on the old content and the next mirror
+// pass wrote that stale body back over the file the user had just edited.
+func TestSyncAppliesLocalEditWithTagChanges(t *testing.T) {
+	mirror, st, user, dataDir := newTestMirror(t)
+	ctx := context.Background()
+
+	memo := createMemo(t, st, user, "first version #original", store.Public)
+	path := filepath.Join(dataDir, DirName, FileName(memo.UID))
+
+	// Rewrite the body the way an external editor would: new text, new hashtag,
+	// and the front matter tag mirror left as it was.
+	edited := strings.Replace(readFile(t, path), "first version #original", "second version #changed", 1)
+	require.NoError(t, os.WriteFile(path, []byte(edited), 0o644))
+
+	report, err := mirror.Sync(ctx)
+	require.NoError(t, err)
+	require.Empty(t, report.Errors)
+	require.Equal(t, 1, report.Updated)
+
+	reloaded, err := st.GetMemo(ctx, &store.FindMemo{UID: &memo.UID})
+	require.NoError(t, err)
+	require.Contains(t, reloaded.Content, "second version", "the edited body must reach the store")
+	require.Contains(t, reloaded.Payload.GetTags(), "changed")
+	require.Contains(t, reloaded.Payload.GetTags(), "original")
+
+	// The file must still hold the edit, not a reverted copy of the old body.
+	after := readFile(t, path)
+	require.Contains(t, after, "second version")
+	require.NotContains(t, after, "first version")
 }
 
 func TestSyncRestoresMemosFromFilesAfterDatabaseLoss(t *testing.T) {

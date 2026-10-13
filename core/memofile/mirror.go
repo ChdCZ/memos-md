@@ -224,6 +224,12 @@ func (m *Mirror) RemoveMemo(_ context.Context, uid string) {
 }
 
 func (m *Mirror) mirrorMemoLocked(ctx context.Context, memo *store.Memo) error {
+	// Attachments are mirrored before the "nothing changed" shortcut below:
+	// binding an attachment does not change the memo file itself (the body and
+	// front matter already reference it), so a shortcut-first order would leave
+	// the bytes out of the data directory entirely.
+	m.mirrorAttachmentsLocked(ctx, memo)
+
 	document := m.renderDocument(ctx, memo)
 	path := filepath.Join(m.dir, FileName(memo.UID))
 	existing, err := os.ReadFile(path)
@@ -245,7 +251,6 @@ func (m *Mirror) mirrorMemoLocked(ctx context.Context, memo *store.Memo) error {
 	if err := writeFileAtomic(path, document, 0o644); err != nil {
 		return errors.Wrap(err, "failed to write memo file")
 	}
-	m.mirrorAttachmentsLocked(ctx, memo)
 	info, err := os.Stat(path)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat memo file")
@@ -303,6 +308,39 @@ func (m *Mirror) renderDocument(ctx context.Context, memo *store.Memo) []byte {
 	return document
 }
 
+// attachmentBytes returns the bytes of an attachment.
+//
+// An upload is not stored in the attachment row: the row keeps metadata and a
+// `reference` to wherever the bytes went. For the default LOCAL storage that is
+// a file under the data directory (absolute, or relative to it), and the blob
+// column stays empty. Only attachments created directly through the store — as
+// tests do — carry an inline blob.
+func (m *Mirror) attachmentBytes(attachment *store.Attachment) ([]byte, bool) {
+	if len(attachment.Blob) > 0 {
+		return attachment.Blob, true
+	}
+	if attachment.StorageType != storepb.AttachmentStorageType_LOCAL {
+		// Object storage (S3): the bytes are not on this filesystem, so there is
+		// nothing to mirror. The reference stays in the front matter.
+		return nil, false
+	}
+	if attachment.Reference == "" {
+		return nil, false
+	}
+	path := filepath.FromSlash(attachment.Reference)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(m.DataDir, path)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("failed to read local attachment", slog.String("uid", attachment.UID), slog.Any("err", err))
+		}
+		return nil, false
+	}
+	return content, true
+}
+
 func (m *Mirror) mirrorAttachmentsLocked(ctx context.Context, memo *store.Memo) {
 	attachments, err := m.Store.ListAttachments(ctx, &store.FindAttachment{MemoID: &memo.ID, GetBlob: true})
 	if err != nil {
@@ -310,14 +348,15 @@ func (m *Mirror) mirrorAttachmentsLocked(ctx context.Context, memo *store.Memo) 
 		return
 	}
 	for _, attachment := range attachments {
-		if len(attachment.Blob) == 0 {
+		content, ok := m.attachmentBytes(attachment)
+		if !ok || len(content) == 0 {
 			continue
 		}
 		path := filepath.Join(m.dir, filepath.FromSlash(AttachmentDir(attachment.UID)), safeFileName(attachment.Filename))
-		if existing, err := os.ReadFile(path); err == nil && len(existing) == len(attachment.Blob) {
+		if existing, err := os.ReadFile(path); err == nil && len(existing) == len(content) {
 			continue
 		}
-		if err := writeFileAtomic(path, attachment.Blob, 0o644); err != nil {
+		if err := writeFileAtomic(path, content, 0o644); err != nil {
 			slog.Warn("failed to write attachment file", slog.String("uid", attachment.UID), slog.Any("err", err))
 		}
 	}
@@ -393,8 +432,14 @@ func (m *Mirror) Sync(ctx context.Context) (*Report, error) {
 		knownUIDs[uid] = struct{}{}
 		if !m.ReadOnly {
 			if file, ok := files[uid]; ok {
-				if err := m.importLocalEditLocked(ctx, memo, file, report); err != nil {
+				// An imported edit returns the refreshed memo, so the mirror
+				// below writes the edited body rather than the copy read before
+				// the import.
+				refreshed, err := m.importLocalEditLocked(ctx, memo, file, report)
+				if err != nil {
 					report.Errors = append(report.Errors, err)
+				} else if refreshed != nil {
+					memo = refreshed
 				}
 			}
 		}
@@ -588,43 +633,59 @@ func (m *Mirror) importUnownedLocked(ctx context.Context, report *Report) {
 	}
 }
 
-func (m *Mirror) importLocalEditLocked(ctx context.Context, memo *store.Memo, path string, report *Report) error {
+func (m *Mirror) importLocalEditLocked(ctx context.Context, memo *store.Memo, path string, report *Report) (*store.Memo, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return errors.Wrap(err, "failed to stat memo file")
+		return nil, errors.Wrap(err, "failed to stat memo file")
 	}
 	entry := m.index.Entries[memo.UID]
+	// The index records the size and modification time of the file this mirror
+	// last wrote. Both can stay identical across a fast edit of the same length,
+	// so this is only a cheap "definitely untouched" test.
 	if entry != nil && info.ModTime().UnixNano() <= entry.ModTime && info.Size() == entry.Size {
 		report.Skipped++
-		return nil
+		return memo, nil
 	}
 	document, err := readDocument(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hashString(document.Body) == hashString(memo.Content) {
 		report.Skipped++
-		return nil
+		return memo, nil
 	}
 
 	update := &store.UpdateMemo{ID: memo.ID}
-	tags := mergeTags(derefTags(document.FrontMatter.Tags), nil)
-	if document.Body != memo.Content {
+	contentChanged := document.Body != memo.Content
+	tags := NormalizeTags(derefTags(document.FrontMatter.Tags))
+	if contentChanged {
 		update.Content = &document.Body
+		// The payload carries the indexed tags and properties, so it has to be
+		// rebuilt from the new body. Writing a payload without the new content
+		// would leave the store on the old body while its tags came from the new
+		// one — and the next mirror pass would then write that stale body back
+		// over the file the user just edited.
 		payload := &store.Memo{}
 		*payload = *memo
 		payload.Content = document.Body
 		if err := memopayload.RebuildMemoPayload(ctx, payload, m.MarkdownService); err != nil {
-			return errors.Wrapf(err, "failed to index edited memo %s", memo.UID)
+			return nil, errors.Wrapf(err, "failed to index edited memo %s", memo.UID)
 		}
 		update.Payload = payload.Payload
-		tags = mergeTags(derefTags(document.FrontMatter.Tags), payload.Payload.GetTags())
+		tags = mergeTags(tags, payload.Payload.GetTags())
 	}
 	// Tags only change when the file says something about them, so a file
 	// without a tags key keeps the tags the store already indexed.
 	if hasTagSignal(document.FrontMatter.Tags, memo.Payload) && !equalTags(tags, memo.Payload.GetTags()) {
-		payload := &storepb.MemoPayload{Property: memo.Payload.GetProperty(), Location: memo.Payload.GetLocation(), Tags: tags}
-		update.Payload = payload
+		if update.Payload == nil {
+			update.Payload = &storepb.MemoPayload{
+				Property: memo.Payload.GetProperty(),
+				Location: memo.Payload.GetLocation(),
+				Tags:     tags,
+			}
+		} else {
+			update.Payload.Tags = tags
+		}
 	}
 	if parsed, err := ParseTime(document.FrontMatter.Updated); err == nil && parsed != memo.UpdatedTs {
 		update.UpdatedTs = &parsed
@@ -639,10 +700,16 @@ func (m *Mirror) importLocalEditLocked(ctx context.Context, memo *store.Memo, pa
 		update.Pinned = document.FrontMatter.Pinned
 	}
 	if err := m.Store.UpdateMemo(ctx, update); err != nil {
-		return errors.Wrapf(err, "failed to apply file edit for memo %s", memo.UID)
+		return nil, errors.Wrapf(err, "failed to apply file edit for memo %s", memo.UID)
 	}
 	report.Updated++
-	return nil
+	// Re-read the memo: the caller mirrors it afterwards, and mirroring the
+	// pre-edit copy would write the old body back over the edit.
+	refreshed, err := m.Store.GetMemo(ctx, &store.FindMemo{UID: &memo.UID})
+	if err != nil || refreshed == nil {
+		return nil, errors.Wrapf(err, "failed to reload memo %s after a file edit", memo.UID)
+	}
+	return refreshed, nil
 }
 
 func (m *Mirror) importAttachmentsLocked(ctx context.Context, memo *store.Memo, attachmentUIDs []string) {

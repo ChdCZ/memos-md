@@ -17,7 +17,11 @@
 FROM --platform=$BUILDPLATFORM node:24-alpine AS frontend
 WORKDIR /src/web
 RUN corepack enable
-COPY web/package.json web/pnpm-lock.yaml ./
+# pnpm-workspace.yaml declares the patched dependency and allowBuilds entries the
+# lockfile was written with, and patches/ holds the patch itself. Installing with
+# only package.json and the lockfile fails with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+COPY web/patches/ ./patches/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 # The SPA imports the generated proto types from web/src/types/proto (tracked in
@@ -29,6 +33,12 @@ RUN node ./node_modules/vite/bin/vite.js build --mode release --outDir=../server
 FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS backend
 WORKDIR /backend-build
 RUN apk add --no-cache git ca-certificates
+# Module proxy. proxy.golang.org is unreachable from some networks, so the
+# module path goes through goproxy.cn first and falls back to the official proxy
+# and then to direct fetches. Override for your own mirror:
+#   docker build --build-arg GOPROXY=https://your.proxy .
+ARG GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
