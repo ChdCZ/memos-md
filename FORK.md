@@ -4,6 +4,9 @@ This is a fork of [usememos/memos](https://github.com/usememos/memos) **v0.31.0*
 migrations and every other behaviour are upstream's, unmodified. One thing was added: **every memo is also stored as a
 markdown file on disk**, and markdown files dropped into that directory are imported back into memos.
 
+This file explains *what changed and how it works*. For *how to publish, deploy, configure and troubleshoot it*, see
+[GUIDE.md](GUIDE.md).
+
 ```
 data/
 ├── memos/                          <- your notes, one file per memo
