@@ -14,10 +14,10 @@
 ```
 master    ── 上游 usememos/memos v0.31.0 原样提交（保留完整历史，方便以后 rebase）
 memos-md  ── 本 fork 的改动，3 个提交
-tag: v0.31.0-memos-md.2 ── 主机实测过的版本
+tag: v0.31.0-memos-md.3 ── 主机实测过的版本
 ```
 
-改动范围很小，一共 23 个文件、约 2400 行，其中真正动到上游代码的只有 6 个：
+改动范围很小，一共 24 个文件、约 2800 行，其中真正动到上游代码的只有 6 个：
 
 | 路径 | 说明 |
 | --- | --- |
@@ -74,7 +74,7 @@ git remote add origin https://github.com/<你的用户名>/memos-md.git
 
 git push -u origin master                      # 让 fork 的分支和上游对齐
 git push origin memos-md                       # 你的改动分支
-git push origin v0.31.0-memos-md.2             # 版本 tag
+git push origin v0.31.0-memos-md.3             # 版本 tag
 ```
 
 推送时 GitHub 会要求认证。用 **Personal Access Token**（代替密码）：
